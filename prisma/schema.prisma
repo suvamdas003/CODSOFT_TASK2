@@ -1,0 +1,513 @@
+// DineDesk database schema.
+// Money is stored as integer MINOR units (e.g. paise, cents) in *Minor columns;
+// the currency is configured in RestaurantSettings.currency and snapshotted on
+// every order and payment. Rates are stored in basis points (1% = 100 bps).
+//
+// Constraints Prisma cannot express (CHECK constraints, the reservation
+// overlap exclusion constraint) live in prisma/migrations/*/migration.sql.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────────
+
+enum Role {
+  CUSTOMER
+  KITCHEN_STAFF
+  ADMIN
+}
+
+enum OrderType {
+  DINE_IN
+  TAKEAWAY
+  DELIVERY
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  READY
+  COMPLETED
+  CANCELLED
+}
+
+/// Order-level payment summary, kept separate from the preparation status.
+enum OrderPaymentStatus {
+  UNPAID
+  PAID
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  ONLINE_CARD
+}
+
+enum PaymentProvider {
+  MANUAL
+  STRIPE
+}
+
+/// Status of an individual payment attempt / record.
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  SEATED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum DiscountType {
+  PERCENT
+  FIXED
+}
+
+enum DietaryLabel {
+  VEGETARIAN
+  VEGAN
+  GLUTEN_FREE
+  DAIRY_FREE
+  NUT_FREE
+  SPICY
+  HALAL
+}
+
+// ─── Authentication (Better Auth core tables) ──────────────────────────────
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  role          Role     @default(CUSTOMER)
+  isActive      Boolean  @default(true)
+  phone         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions          Session[]
+  accounts          Account[]
+  orders            Order[]
+  reservations      Reservation[]      @relation("ReservationCustomer")
+  auditEvents       AuditEvent[]
+  orderStatusEvents OrderStatusEvent[]
+  recordedPayments  Payment[]          @relation("PaymentRecordedBy")
+
+  @@index([role])
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  /// Password hash (never a raw password). Managed by Better Auth.
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verifications")
+}
+
+/// Better Auth rate-limit buckets (database storage so limits survive restarts).
+model RateLimit {
+  id          String @id @default(cuid())
+  key         String @unique
+  count       Int
+  lastRequest BigInt
+
+  @@map("rate_limits")
+}
+
+// ─── Menu ───────────────────────────────────────────────────────────────────
+
+model MenuCategory {
+  id          String     @id @default(cuid())
+  name        String     @unique
+  slug        String     @unique
+  description String?
+  sortOrder   Int        @default(0)
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  items       MenuItem[]
+
+  @@index([isActive, sortOrder])
+  @@map("menu_categories")
+}
+
+model MenuItem {
+  id              String         @id @default(cuid())
+  categoryId      String
+  /// Categories with items cannot be deleted (Restrict); archive items first.
+  category        MenuCategory   @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  name            String
+  slug            String         @unique
+  description     String         @default("")
+  priceMinor      Int
+  imageUrl        String?
+  dietaryLabels   DietaryLabel[]
+  /// Visible on the public menu.
+  isPublished     Boolean        @default(true)
+  /// Currently purchasable (e.g. not sold out).
+  isAvailable     Boolean        @default(true)
+  isFeatured      Boolean        @default(false)
+  prepTimeMinutes Int?
+  sortOrder       Int            @default(0)
+  /// Soft delete: archived items are hidden everywhere but kept for history.
+  archivedAt      DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  variants   ItemVariant[]
+  addOns     AddOn[]
+  orderItems OrderItem[]
+
+  @@index([categoryId, isPublished, sortOrder])
+  @@index([isFeatured])
+  @@map("menu_items")
+}
+
+/// Mutually exclusive size/portion options. When an item has available
+/// variants, exactly one must be selected.
+model ItemVariant {
+  id              String   @id @default(cuid())
+  menuItemId      String
+  menuItem        MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  name            String
+  /// Added to (or, if negative, subtracted from) the item base price.
+  priceDeltaMinor Int      @default(0)
+  isAvailable     Boolean  @default(true)
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([menuItemId, name])
+  @@map("item_variants")
+}
+
+/// Optional extras; any number may be selected (each at most once per line).
+model AddOn {
+  id          String   @id @default(cuid())
+  menuItemId  String
+  menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  name        String
+  priceMinor  Int      @default(0)
+  isAvailable Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([menuItemId, name])
+  @@map("add_ons")
+}
+
+// ─── Tables & reservations ─────────────────────────────────────────────────
+
+model RestaurantTable {
+  id           String        @id @default(cuid())
+  label        String        @unique
+  capacity     Int
+  location     String?
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  reservations Reservation[]
+  orders       Order[]
+
+  @@map("restaurant_tables")
+}
+
+model Reservation {
+  id           String            @id @default(cuid())
+  /// Short human-friendly reference shown to customers.
+  code         String            @unique
+  customerId   String?
+  customer     User?             @relation("ReservationCustomer", fields: [customerId], references: [id], onDelete: Restrict)
+  tableId      String
+  table        RestaurantTable   @relation(fields: [tableId], references: [id], onDelete: Restrict)
+  partySize    Int
+  startsAt     DateTime          @db.Timestamptz(3)
+  endsAt       DateTime          @db.Timestamptz(3)
+  status       ReservationStatus @default(PENDING)
+  contactName  String
+  contactPhone String
+  notes        String?
+  cancelledAt  DateTime?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@index([tableId, startsAt])
+  @@index([startsAt, status])
+  @@index([customerId, startsAt])
+  @@map("reservations")
+}
+
+// ─── Orders ─────────────────────────────────────────────────────────────────
+
+model Order {
+  id                 String             @id @default(cuid())
+  /// Sequential, unique, human-readable number (displayed as e.g. DD-001042).
+  orderNumber        Int                @unique @default(autoincrement())
+  customerId         String
+  customer           User               @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  type               OrderType
+  status             OrderStatus        @default(PENDING)
+  paymentStatus      OrderPaymentStatus @default(UNPAID)
+  paymentMethod      PaymentMethod
+  tableId            String?
+  table              RestaurantTable?   @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  contactName        String
+  contactPhone       String?
+  deliveryAddress    String?
+  notes              String?
+  /// ISO 4217 code snapshotted from settings at checkout.
+  currency           String             @db.Char(3)
+  subtotalMinor      Int
+  discountMinor      Int                @default(0)
+  serviceChargeMinor Int                @default(0)
+  taxMinor           Int                @default(0)
+  deliveryFeeMinor   Int                @default(0)
+  totalMinor         Int
+  taxRateBps         Int                @default(0)
+  serviceChargeBps   Int                @default(0)
+  discountCode       String?
+  /// Client-generated key; the (customerId, idempotencyKey) pair is unique so a
+  /// retried/double-clicked checkout never creates a second order.
+  idempotencyKey     String
+  placedAt           DateTime           @default(now())
+  confirmedAt        DateTime?
+  preparingAt        DateTime?
+  readyAt            DateTime?
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  cancelReason       String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  items        OrderItem[]
+  payments     Payment[]
+  statusEvents OrderStatusEvent[]
+
+  @@unique([customerId, idempotencyKey])
+  @@index([status, placedAt])
+  @@index([customerId, placedAt])
+  @@index([placedAt])
+  @@map("orders")
+}
+
+/// Snapshot of a purchased line. Names and prices are copied at checkout so
+/// receipts stay accurate when the menu changes later.
+model OrderItem {
+  id             String    @id @default(cuid())
+  orderId        String
+  order          Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItemId     String?
+  menuItem       MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+  nameSnapshot   String
+  variantName    String?
+  /// [{ "name": string, "priceMinor": number }]
+  addOns         Json      @default("[]")
+  basePriceMinor Int
+  unitPriceMinor Int
+  quantity       Int
+  lineTotalMinor Int
+  notes          String?
+
+  @@index([orderId])
+  @@index([menuItemId])
+  @@map("order_items")
+}
+
+model OrderStatusEvent {
+  id         String       @id @default(cuid())
+  orderId    String
+  order      Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  actorId    String?
+  actor      User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  note       String?
+  createdAt  DateTime     @default(now())
+
+  @@index([orderId, createdAt])
+  @@map("order_status_events")
+}
+
+// ─── Payments ───────────────────────────────────────────────────────────────
+
+model Payment {
+  id             String          @id @default(cuid())
+  orderId        String
+  order          Order           @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  provider       PaymentProvider
+  method         PaymentMethod
+  status         PaymentStatus   @default(PENDING)
+  amountMinor    Int
+  currency       String          @db.Char(3)
+  /// Provider object id (e.g. Stripe Checkout Session id). Never card data.
+  providerRef    String?
+  /// Provider transaction id (e.g. PaymentIntent id) or manual receipt ref.
+  transactionRef String?
+  recordedById   String?
+  recordedBy     User?           @relation("PaymentRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+  failureReason  String?
+  paidAt         DateTime?
+  refundedAt     DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@unique([provider, providerRef])
+  @@index([orderId])
+  @@index([status, paidAt])
+  @@map("payments")
+}
+
+/// Processed provider webhook deliveries, for idempotent handling.
+model WebhookEvent {
+  id          String          @id @default(cuid())
+  provider    PaymentProvider
+  eventId     String
+  type        String
+  processedAt DateTime        @default(now())
+
+  @@unique([provider, eventId])
+  @@map("webhook_events")
+}
+
+model DiscountCode {
+  id               String       @id @default(cuid())
+  /// Stored upper-case.
+  code             String       @unique
+  description      String?
+  type             DiscountType
+  /// PERCENT: basis points (1000 = 10%). FIXED: minor units.
+  value            Int
+  minSubtotalMinor Int          @default(0)
+  maxDiscountMinor Int?
+  isActive         Boolean      @default(true)
+  startsAt         DateTime?
+  endsAt           DateTime?
+  maxRedemptions   Int?
+  redemptionCount  Int          @default(0)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@map("discount_codes")
+}
+
+// ─── Restaurant configuration ───────────────────────────────────────────────
+
+/// Singleton row (id = 1, enforced by a CHECK constraint).
+model RestaurantSettings {
+  id                          Int             @id @default(1)
+  name                        String          @default("DineDesk Bistro")
+  tagline                     String?
+  phone                       String?
+  email                       String?
+  address                     String?
+  /// ISO 4217 currency code, e.g. INR, USD, EUR.
+  currency                    String          @default("INR") @db.Char(3)
+  /// BCP 47 locale used for formatting, e.g. en-IN.
+  locale                      String          @default("en-IN")
+  /// IANA time zone used for opening hours and reservations.
+  timezone                    String          @default("Asia/Kolkata")
+  taxRateBps                  Int             @default(500)
+  serviceChargeBps            Int             @default(0)
+  deliveryFeeMinor            Int             @default(0)
+  enabledOrderTypes           OrderType[]     @default([DINE_IN, TAKEAWAY])
+  enabledPaymentMethods       PaymentMethod[] @default([CASH])
+  acceptingOrders             Boolean         @default(true)
+  customerCancelWindowMinutes Int             @default(5)
+  reservationDurationMinutes  Int             @default(90)
+  reservationSlotMinutes      Int             @default(30)
+  reservationLeadMinutes      Int             @default(60)
+  reservationMaxDaysAhead     Int             @default(30)
+  maxPartySize                Int             @default(12)
+  autoConfirmReservations     Boolean         @default(true)
+  kitchenLateMinutes          Int             @default(20)
+  updatedAt                   DateTime        @updatedAt
+
+  @@map("restaurant_settings")
+}
+
+/// Weekly opening hours in the restaurant time zone. Minutes from midnight.
+/// Overnight opening (closing after midnight) is not supported.
+model OpeningHours {
+  /// 0 = Sunday … 6 = Saturday
+  dayOfWeek   Int     @id
+  isClosed    Boolean @default(false)
+  openMinute  Int
+  closeMinute Int
+
+  @@map("opening_hours")
+}
+
+model AuditEvent {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action     String
+  entityType String
+  entityId   String?
+  summary    String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_events")
+}

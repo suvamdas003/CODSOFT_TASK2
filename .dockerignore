@@ -1,0 +1,37 @@
+# Keep the build context small and free of secrets.
+
+# Environment files (secrets) — never sent to the Docker daemon
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Dependencies and build output (rebuilt inside the image)
+node_modules
+.next
+out
+build
+src/generated
+
+# Tests artefacts, caches, logs
+coverage
+test-results
+playwright-report
+blob-report
+tests/e2e/.auth
+*.log
+*.tsbuildinfo
+next-env.d.ts
+
+# Local tooling, VCS, archives, backups
+.git
+.gitignore
+.vscode
+.idea
+.claude
+release
+backups
+*.dump
+*.zip
+Dockerfile
+docker-compose*.yml

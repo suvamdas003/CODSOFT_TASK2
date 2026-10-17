@@ -1,0 +1,28 @@
+name: dinedesk
+# DEVELOPMENT/TEST database only (not the production stack — see docker-compose.yml).
+# Optional: Docker is not required; a locally installed PostgreSQL works too.
+#   docker compose -f docker-compose.dev.yml up -d
+# Creates databases: dinedesk (dev), dinedesk_test (integration), dinedesk_e2e (Playwright).
+# The password below is a local development value only.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: dinedesk-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dinedesk
+      POSTGRES_PASSWORD: dinedesk_dev_password
+      POSTGRES_DB: dinedesk
+    ports:
+      - "5433:5432"
+    volumes:
+      - dinedesk-pg17-data:/var/lib/postgresql/data
+      - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dinedesk -d dinedesk"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  dinedesk-pg17-data:

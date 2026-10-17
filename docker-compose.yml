@@ -1,0 +1,131 @@
+# DineDesk production stack.
+#
+#   npm run env:init:prod          # once: creates .env.production with random secrets
+#   docker compose up --build -d   # build and start everything
+#
+# Services: db (PostgreSQL, private) → migrate (one-shot `prisma migrate deploy`)
+#           → app (Next.js, private) → web (nginx, the only published port).
+# Optional demo data (never in production):
+#   docker compose --profile demo run --rm seed
+name: dinedesk-prod
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    env_file:
+      - path: .env.production
+        required: true
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 30s
+    logging: *logging
+
+  migrate:
+    build:
+      context: .
+      target: tools
+    image: dinedesk-tools:latest
+    env_file:
+      - path: .env.production
+        required: true
+    command: ["npx", "prisma", "migrate", "deploy"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+    restart: "no"
+    logging: *logging
+
+  app:
+    build:
+      context: .
+      target: runner
+    image: dinedesk-app:latest
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: .env.production
+        required: true
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [backend, frontend]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.next/cache
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    stop_grace_period: 30s
+    logging: *logging
+
+  web:
+    image: nginxinc/nginx-unprivileged:1.29-alpine
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [frontend]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  # Demo data for evaluation only. Requires the explicit ALLOW_DEMO_SEED opt-in.
+  seed:
+    profiles: [demo]
+    image: dinedesk-tools:latest
+    env_file:
+      - path: .env.production
+        required: true
+    environment:
+      ALLOW_DEMO_SEED: "true"
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@dinedesk.test}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-DevOnly-Admin-2026!}
+      SEED_KITCHEN_EMAIL: ${SEED_KITCHEN_EMAIL:-kitchen@dinedesk.test}
+      SEED_KITCHEN_PASSWORD: ${SEED_KITCHEN_PASSWORD:-DevOnly-Kitchen-2026!}
+      SEED_CUSTOMER_EMAIL: ${SEED_CUSTOMER_EMAIL:-customer@dinedesk.test}
+      SEED_CUSTOMER_PASSWORD: ${SEED_CUSTOMER_PASSWORD:-DevOnly-Customer-2026!}
+    command: ["npx", "tsx", "prisma/seed.ts"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [backend]
+    restart: "no"
+    logging: *logging
+
+networks:
+  backend:
+    internal: true
+  frontend: {}
+
+volumes:
+  pgdata:

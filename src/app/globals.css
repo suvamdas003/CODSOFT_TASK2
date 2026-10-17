@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
+}
+
+@theme {
+  /* Terracotta brand scale (primary actions). White text on 600+ meets WCAG AA. */
+  --color-brand-50: #fdf5f0;
+  --color-brand-100: #fae6da;
+  --color-brand-200: #f4c9b2;
+  --color-brand-300: #eca381;
+  --color-brand-400: #e2774f;
+  --color-brand-500: #d45a32;
+  --color-brand-600: #b4462a;
+  --color-brand-700: #963823;
+  --color-brand-800: #7a3022;
+  --color-brand-900: #642a1f;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-stone-50);
+  color: var(--color-stone-900);
+}
+
+/* Visible keyboard focus everywhere. */
+:focus-visible {
+  outline: 2px solid var(--color-brand-600);
+  outline-offset: 2px;
+}
+
+dialog::backdrop {
+  background: rgb(28 25 23 / 0.5);
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: white;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
